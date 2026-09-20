@@ -2,6 +2,8 @@ name: XAI Researcher
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write
@@ -13,6 +15,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests feedparser
 
       - name: Install Ollama
         run: |
@@ -34,10 +41,138 @@ jobs:
         run: |
           ollama pull qwen3:8b
 
-      - name: Test Qwen
+      - name: Collect recent arXiv research
         run: |
-          ollama run qwen3:8b "You are an AI research assistant monitoring explainable AI, responsible AI, AI safety, AI ethics, AI governance, AI regulation, and AI research. Respond with exactly one sentence confirming that you are ready to analyze research material."
+          python - <<'PY'
+          import feedparser
+          import json
+          import urllib.parse
 
-      - name: Show repository structure
+          queries = [
+              '("explainable AI" OR "interpretable AI")',
+              '("responsible AI" OR "trustworthy AI")',
+              '("AI safety" OR "AI alignment")',
+              '("AI governance" OR "AI accountability")',
+              '("AI fairness" OR "algorithmic bias")',
+              '("AI ethics" OR "AI transparency")',
+              '("AI auditing" OR "AI evaluation")'
+          ]
+
+          entries = {}
+
+          for query in queries:
+              url = (
+                  "https://export.arxiv.org/api/query?"
+                  + urllib.parse.urlencode({
+                      "search_query": "all:" + query,
+                      "start": 0,
+                      "max_results": 20,
+                      "sortBy": "submittedDate",
+                      "sortOrder": "descending"
+                  })
+              )
+
+              feed = feedparser.parse(url)
+
+              for entry in feed.entries:
+                  entries[entry.id] = {
+                      "title": entry.title.strip(),
+                      "url": entry.link,
+                      "published": entry.get("published", ""),
+                      "summary": entry.get("summary", "").strip(),
+                      "authors": [a.name for a in entry.get("authors", [])]
+                  }
+
+          with open("data/arxiv-new.json", "w", encoding="utf-8") as f:
+              json.dump(list(entries.values()), f, indent=2, ensure_ascii=False)
+
+          print(f"Collected {len(entries)} unique arXiv papers.")
+          PY
+
+      - name: Analyze research with Qwen
         run: |
-          find research best-practices laws-regulations standards news data -maxdepth 2 -type f | sort
+          python - <<'PY'
+          import json
+          import subprocess
+
+          with open("data/arxiv-new.json", encoding="utf-8") as f:
+              papers = json.load(f)
+
+          prompt = """You are the research analyst for a repository monitoring:
+
+          - Explainable AI
+          - AI transparency
+          - AI interpretability
+          - Algorithmic accountability
+          - AI auditing
+          - AI governance
+          - AI safety
+          - AI robustness and reliability
+          - AI evaluation and testing
+          - AI red-teaming
+          - AI bias and fairness
+          - AI impacts on vulnerable or marginalized populations
+          - Human oversight
+          - Human rights and civil liberties
+          - AI privacy and surveillance
+          - Responsible and trustworthy AI
+          - AI ethics
+          - AI alignment
+          - AI regulation and policy
+
+          Review the supplied research papers.
+
+          Return ONLY valid JSON.
+
+          Return an array of objects with exactly these fields:
+
+          title
+          url
+          category
+          relevant
+          summary
+          tags
+
+          category must be one of:
+          research
+          best-practices
+          standards
+          laws-regulations
+          news
+
+          relevant must be true or false.
+
+          Include papers when their substance is relevant to the topics above,
+          even if the paper does not use the terms "XAI" or "responsible AI".
+
+          Papers that are not relevant must have relevant=false.
+
+          PAPERS:
+          """ + json.dumps(papers, ensure_ascii=False)
+
+          result = subprocess.run(
+              ["ollama", "run", "qwen3:8b"],
+              input=prompt,
+              text=True,
+              capture_output=True,
+              check=True
+          )
+
+          output = result.stdout.strip()
+
+          if "```json" in output:
+              output = output.split("```json", 1)[1].split("```", 1)[0].strip()
+          elif "```" in output:
+              output = output.split("```", 1)[1].split("```", 1)[0].strip()
+
+          analyzed = json.loads(output)
+
+          with open("data/xai-analyzed.json", "w", encoding="utf-8") as f:
+              json.dump(analyzed, f, indent=2, ensure_ascii=False)
+
+          print(f"Qwen analyzed {len(analyzed)} papers.")
+          PY
+
+      - name: Show results
+        run: |
+          cat data/xai-analyzed.json
