@@ -1,0 +1,30 @@
+name: XAI Researcher
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read researcher instructions
+        run: |
+          echo "XAI Researcher instructions:"
+          cat .github/agents/xai-researcher.agent.md
+
+      - name: Verify repository structure
+        run: |
+          echo "Repository structure:"
+          find research best-practices laws-regulations standards news data -maxdepth 2 -type f | sort
+
+      - name: Show CSV
+        run: |
+          echo "Current XAI update database:"
+          cat data/xai-updates.csv
