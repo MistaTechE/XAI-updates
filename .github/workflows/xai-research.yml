@@ -3,7 +3,7 @@ name: XAI Researcher
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 21 * * *"
 
 permissions:
   contents: write
@@ -16,10 +16,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests feedparser
+          pip install requests feedparser beautifulsoup4
 
       - name: Install Ollama
         run: |
@@ -41,114 +41,666 @@ jobs:
         run: |
           ollama pull qwen3:8b
 
-      - name: Collect recent arXiv research
+      - name: Collect XAI information
         run: |
-          python - <<'PY'
-          import feedparser
+          cat > /tmp/collect_xai.py <<'PY'
           import json
           import urllib.parse
+          import requests
+          import feedparser
+          from bs4 import BeautifulSoup
 
-          queries = [
-              '("explainable AI" OR "interpretable AI")',
-              '("responsible AI" OR "trustworthy AI")',
-              '("AI safety" OR "AI alignment")',
-              '("AI governance" OR "AI accountability")',
-              '("AI fairness" OR "algorithmic bias")',
-              '("AI ethics" OR "AI transparency")',
-              '("AI auditing" OR "AI evaluation")'
-          ]
+          items = {}
 
-          entries = {}
+          def add_item(source, category, title, url,
+                       summary="", published=""):
 
-          for query in queries:
+              if not title or not url:
+                  return
+
+              key = url.strip().lower()
+
+              items[key] = {
+                  "source": source,
+                  "category": category,
+                  "title": title.strip(),
+                  "url": url.strip(),
+                  "summary": summary.strip(),
+                  "published": published
+              }
+
+          def rss(source, category, url):
+
+              print(f"Collecting RSS: {source}")
+
+              try:
+                  feed = feedparser.parse(url)
+
+                  for entry in feed.entries:
+
+                      add_item(
+                          source,
+                          category,
+                          entry.get("title", ""),
+                          entry.get("link", ""),
+                          entry.get("summary", ""),
+                          entry.get("published", "")
+                      )
+
+              except Exception as e:
+                  print(f"RSS error for {source}: {e}")
+
+          def openalex(query):
+
+              print(f"OpenAlex: {query}")
+
+              params = {
+                  "search": query,
+                  "filter": "from_publication_date:2026-01-01",
+                  "sort": "publication_date:desc",
+                  "per-page": 50
+              }
+
+              try:
+
+                  response = requests.get(
+                      "https://api.openalex.org/works",
+                      params=params,
+                      timeout=30
+                  )
+
+                  response.raise_for_status()
+
+                  for work in response.json().get("results", []):
+
+                      url = (
+                          work.get("doi")
+                          or work.get("primary_location", {})
+                              .get("landing_page_url")
+                          or work.get("id")
+                      )
+
+                      abstract = ""
+
+                      if work.get("abstract_inverted_index"):
+
+                          abstract = " ".join(
+                              work["abstract_inverted_index"].keys()
+                          )
+
+                      add_item(
+                          "OpenAlex",
+                          "research",
+                          work.get("title", ""),
+                          url,
+                          abstract,
+                          work.get("publication_date", "")
+                      )
+
+              except Exception as e:
+                  print(f"OpenAlex error: {e}")
+
+          def semantic_scholar(query):
+
+              print(f"Semantic Scholar: {query}")
+
+              params = {
+                  "query": query,
+                  "limit": 50,
+                  "fields":
+                      "title,abstract,url,publicationDate,authors"
+              }
+
+              try:
+
+                  response = requests.get(
+                      "https://api.semanticscholar.org/graph/v1/paper/search",
+                      params=params,
+                      timeout=30
+                  )
+
+                  response.raise_for_status()
+
+                  for paper in response.json().get("data", []):
+
+                      add_item(
+                          "Semantic Scholar",
+                          "research",
+                          paper.get("title", ""),
+                          paper.get("url", ""),
+                          paper.get("abstract", "") or "",
+                          paper.get("publicationDate", "") or ""
+                      )
+
+              except Exception as e:
+                  print(f"Semantic Scholar error: {e}")
+
+          def federal_register(query):
+
+              print(f"Federal Register: {query}")
+
+              params = {
+                  "q": query,
+                  "per_page": 100,
+                  "order": "newest"
+              }
+
+              try:
+
+                  response = requests.get(
+                      "https://www.federalregister.gov/api/v1/documents.json",
+                      params=params,
+                      timeout=30
+                  )
+
+                  response.raise_for_status()
+
+                  for document in response.json().get("results", []):
+
+                      add_item(
+                          "U.S. Federal Register",
+                          "laws-regulations",
+                          document.get("title", ""),
+                          document.get("html_url", ""),
+                          document.get("abstract", "") or "",
+                          document.get("publication_date", "")
+                      )
+
+              except Exception as e:
+                  print(f"Federal Register error: {e}")
+
+          def govinfo_search(query):
+
+              print(f"GovInfo: {query}")
+
+              encoded = urllib.parse.quote(query)
+
               url = (
-                  "https://export.arxiv.org/api/query?"
-                  + urllib.parse.urlencode({
-                      "search_query": "all:" + query,
-                      "start": 0,
-                      "max_results": 20,
-                      "sortBy": "submittedDate",
-                      "sortOrder": "descending"
-                  })
+                  "https://www.govinfo.gov/wssearch/rb/"
+                  f"{encoded}/1/100/0/json"
               )
 
-              feed = feedparser.parse(url)
+              try:
 
-              for entry in feed.entries:
-                  entries[entry.id] = {
-                      "title": entry.title.strip(),
-                      "url": entry.link,
-                      "published": entry.get("published", ""),
-                      "summary": entry.get("summary", "").strip(),
-                      "authors": [a.name for a in entry.get("authors", [])]
-                  }
+                  response = requests.get(
+                      url,
+                      timeout=30
+                  )
 
-          with open("data/arxiv-new.json", "w", encoding="utf-8") as f:
-              json.dump(list(entries.values()), f, indent=2, ensure_ascii=False)
+                  if response.status_code != 200:
+                      print(
+                          f"GovInfo returned HTTP "
+                          f"{response.status_code}"
+                      )
+                      return
 
-          print(f"Collected {len(entries)} unique arXiv papers.")
+                  data = response.json()
+
+                  for result in data.get("results", []):
+
+                      title = result.get("title", "")
+                      link = result.get("link", "")
+
+                      if not link:
+                          link = result.get(
+                              "packageLink",
+                              ""
+                          )
+
+                      add_item(
+                          "U.S. GovInfo",
+                          "laws-regulations",
+                          title,
+                          link,
+                          result.get(
+                              "description",
+                              ""
+                          ) or "",
+                          result.get(
+                              "dateIssued",
+                              ""
+                          ) or ""
+                      )
+
+              except Exception as e:
+                  print(f"GovInfo error: {e}")
+
+          def webpage(source, category, url):
+
+              print(f"Collecting webpage: {source}")
+
+              try:
+
+                  response = requests.get(
+                      url,
+                      timeout=30,
+                      headers={
+                          "User-Agent":
+                              "Mozilla/5.0 XAI-Researcher"
+                      }
+                  )
+
+                  response.raise_for_status()
+
+                  soup = BeautifulSoup(
+                      response.text,
+                      "html.parser"
+                  )
+
+                  title = (
+                      soup.title.get_text(strip=True)
+                      if soup.title
+                      else source
+                  )
+
+                  description = ""
+
+                  meta = soup.find(
+                      "meta",
+                      attrs={"name": "description"}
+                  )
+
+                  if meta:
+                      description = meta.get(
+                          "content",
+                          ""
+                      )
+
+                  add_item(
+                      source,
+                      category,
+                      title,
+                      url,
+                      description
+                  )
+
+              except Exception as e:
+                  print(
+                      f"Webpage error for "
+                      f"{source}: {e}"
+                  )
+
+          research_queries = [
+
+              "explainable artificial intelligence",
+              "interpretable artificial intelligence",
+              "AI transparency",
+              "responsible artificial intelligence",
+              "trustworthy artificial intelligence",
+
+              "AI safety",
+              "AI alignment",
+              "AI governance",
+              "algorithmic accountability",
+              "AI auditing",
+              "AI evaluation",
+              "AI red teaming",
+
+              "AI fairness",
+              "algorithmic bias",
+              "AI discrimination",
+              "AI equity",
+
+              "AI ethics",
+              "AI privacy",
+              "AI surveillance",
+              "human oversight artificial intelligence",
+              "human rights artificial intelligence",
+
+              "AI risk management",
+              "AI robustness",
+              "AI reliability",
+              "AI testing",
+              "AI impact assessment",
+              "AI incident management",
+              "AI security",
+
+              "adversarial machine learning",
+              "prompt injection",
+              "AI cybersecurity",
+
+              "AI philosophy",
+              "philosophy of artificial intelligence",
+              "moral responsibility artificial intelligence",
+              "AI accountability",
+
+              "vulnerable populations artificial intelligence",
+              "marginalized populations artificial intelligence",
+              "historically disadvantaged artificial intelligence",
+
+              "privacy preserving artificial intelligence",
+              "facial recognition artificial intelligence",
+              "biometric artificial intelligence",
+
+              "autonomous systems ethics",
+              "machine ethics",
+              "AI moral agency"
+          ]
+
+          for query in research_queries:
+
+              openalex(query)
+              semantic_scholar(query)
+
+          for query in research_queries:
+
+              encoded = urllib.parse.quote(
+                  f'all:"{query}"'
+              )
+
+              url = (
+                  "https://export.arxiv.org/api/query?"
+                  f"search_query={encoded}"
+                  "&start=0"
+                  "&max_results=30"
+                  "&sortBy=submittedDate"
+                  "&sortOrder=descending"
+              )
+
+              rss(
+                  "arXiv",
+                  "research",
+                  url
+              )
+
+          nist_sources = [
+
+              (
+                  "NIST News",
+                  "news",
+                  "https://www.nist.gov/news-events/news/rss.xml"
+              ),
+
+              (
+                  "NIST Taking Measure",
+                  "best-practices",
+                  "https://www.nist.gov/blogs/taking-measure/rss.xml"
+              )
+          ]
+
+          for source, category, url in nist_sources:
+              rss(source, category, url)
+
+          government_feeds = [
+
+              (
+                  "GOV.UK AI",
+                  "laws-regulations",
+                  "https://www.gov.uk/search/news-and-communications.atom"
+                  "?keywords=artificial%20intelligence"
+              ),
+
+              (
+                  "GOV.UK AI Regulation",
+                  "laws-regulations",
+                  "https://www.gov.uk/search/all.atom"
+                  "?keywords=AI%20regulation"
+              ),
+
+              (
+                  "GOV.UK AI Safety",
+                  "laws-regulations",
+                  "https://www.gov.uk/search/all.atom"
+                  "?keywords=AI%20safety"
+              ),
+
+              (
+                  "GOV.UK AI Governance",
+                  "laws-regulations",
+                  "https://www.gov.uk/search/all.atom"
+                  "?keywords=AI%20governance"
+              ),
+
+              (
+                  "GOV.UK Artificial Intelligence",
+                  "news",
+                  "https://www.gov.uk/search/all.atom"
+                  "?keywords=artificial%20intelligence"
+              )
+          ]
+
+          for source, category, url in government_feeds:
+              rss(source, category, url)
+
+          federal_register_queries = [
+
+              "artificial intelligence",
+              "AI regulation",
+              "AI safety",
+              "AI governance",
+              "AI transparency",
+              "AI accountability",
+              "AI risk",
+              "AI bias",
+              "algorithmic discrimination",
+              "automated decision systems",
+              "machine learning",
+              "artificial intelligence executive order",
+              "artificial intelligence federal policy"
+          ]
+
+          for query in federal_register_queries:
+              federal_register(query)
+
+          govinfo_queries = [
+
+              "artificial intelligence",
+              "AI regulation",
+              "AI safety",
+              "AI governance",
+              "algorithmic accountability",
+              "artificial intelligence transparency",
+              "artificial intelligence privacy",
+              "artificial intelligence bias",
+              "automated decision systems"
+          ]
+
+          for query in govinfo_queries:
+              govinfo_search(query)
+
+          eu_sources = [
+
+              (
+                  "EUR-Lex AI Act",
+                  "laws-regulations",
+                  "https://eur-lex.europa.eu/eli/reg/2024/1689/oj"
+              ),
+
+              (
+                  "European Commission AI",
+                  "laws-regulations",
+                  "https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai"
+              ),
+
+              (
+                  "European Commission AI Act",
+                  "laws-regulations",
+                  "https://digital-strategy.ec.europa.eu/en/policies/european-approach-artificial-intelligence"
+              )
+          ]
+
+          for source, category, url in eu_sources:
+              webpage(
+                  source,
+                  category,
+                  url
+              )
+
+          news_queries = [
+
+              "explainable AI",
+              "AI transparency",
+              "AI interpretability",
+              "AI ethics",
+              "AI safety",
+              "AI regulation",
+              "AI governance",
+              "AI accountability",
+
+              "AI bias",
+              "AI fairness",
+              "algorithmic discrimination",
+
+              "AI privacy",
+              "AI surveillance",
+              "AI human rights",
+
+              "AI red teaming",
+              "AI auditing",
+              "AI evaluation",
+
+              "responsible AI",
+              "trustworthy AI",
+
+              "AI risk management",
+              "AI impact assessment",
+
+              "AI law",
+              "AI legislation",
+              "AI executive order",
+
+              "AI standards",
+              "AI safety standards"
+          ]
+
+          for query in news_queries:
+
+              encoded = urllib.parse.quote(query)
+
+              rss(
+                  "Google News",
+                  "news",
+                  "https://news.google.com/rss/search?"
+                  f"q={encoded}"
+                  "&hl=en-US"
+                  "&gl=US"
+                  "&ceid=US:en"
+              )
+
+          collected = list(items.values())
+
+          with open(
+              "data/collected-items.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              json.dump(
+                  collected,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
+
+          print()
+          print("=" * 60)
+          print(
+              f"TOTAL UNIQUE ITEMS: "
+              f"{len(collected)}"
+          )
+          print("=" * 60)
+
+          counts = {}
+
+          for item in collected:
+
+              source = item["source"]
+
+              counts[source] = (
+                  counts.get(source, 0) + 1
+              )
+
+          for source, count in sorted(
+              counts.items()
+          ):
+
+              print(
+                  f"{source}: {count}"
+              )
+
           PY
 
-      - name: Analyze research with Qwen
+          python /tmp/collect_xai.py
+
+      - name: Analyze collected information with XAI Researcher Agent
         run: |
           python - <<'PY'
           import json
           import subprocess
 
-          with open("data/arxiv-new.json", encoding="utf-8") as f:
-              papers = json.load(f)
+          agent_file = ".github/agents/xai-researcher.agent.md"
 
-          prompt = """You are the research analyst for a repository monitoring:
+          with open(
+              agent_file,
+              encoding="utf-8"
+          ) as f:
+              agent_instructions = f.read()
 
-          - Explainable AI
-          - AI transparency
-          - AI interpretability
-          - Algorithmic accountability
-          - AI auditing
-          - AI governance
-          - AI safety
-          - AI robustness and reliability
-          - AI evaluation and testing
-          - AI red-teaming
-          - AI bias and fairness
-          - AI impacts on vulnerable or marginalized populations
-          - Human oversight
-          - Human rights and civil liberties
-          - AI privacy and surveillance
-          - Responsible and trustworthy AI
-          - AI ethics
-          - AI alignment
-          - AI regulation and policy
+          with open(
+              "data/collected-items.json",
+              encoding="utf-8"
+          ) as f:
+              items = json.load(f)
 
-          Review the supplied research papers.
+          print(
+              f"Sending {len(items)} items to Qwen."
+          )
+
+          prompt = f"""
+          You are executing the XAI Researcher Agent.
+
+          The following file contains the research
+          instructions for this agent:
+
+          ==================== AGENT INSTRUCTIONS ====================
+
+          {agent_instructions}
+
+          ================= END AGENT INSTRUCTIONS ===================
+
+          Use those instructions to analyze the collected
+          research material below.
+
+          IMPORTANT OUTPUT REQUIREMENTS:
 
           Return ONLY valid JSON.
 
-          Return an array of objects with exactly these fields:
+          Return an array containing ONLY relevant items.
+
+          Each object MUST contain exactly:
 
           title
           url
+          source
           category
-          relevant
           summary
           tags
 
-          category must be one of:
+          category MUST be one of:
+
           research
           best-practices
           standards
           laws-regulations
           news
 
-          relevant must be true or false.
+          summary:
+          Maximum 2 sentences.
 
-          Include papers when their substance is relevant to the topics above,
-          even if the paper does not use the terms "XAI" or "responsible AI".
+          tags:
+          Array of short descriptive strings.
 
-          Papers that are not relevant must have relevant=false.
+          Do not invent information that is not present
+          in the collected material.
 
-          PAPERS:
-          """ + json.dumps(papers, ensure_ascii=False)
+          Do not return markdown.
+
+          ==================== COLLECTED ITEMS ====================
+
+          {json.dumps(items, ensure_ascii=False)}
+
+          ================= END COLLECTED ITEMS ======================
+          """
 
           result = subprocess.run(
               ["ollama", "run", "qwen3:8b"],
@@ -161,18 +713,172 @@ jobs:
           output = result.stdout.strip()
 
           if "```json" in output:
-              output = output.split("```json", 1)[1].split("```", 1)[0].strip()
+
+              output = output.split(
+                  "```json",
+                  1
+              )[1].split(
+                  "```",
+                  1
+              )[0].strip()
+
           elif "```" in output:
-              output = output.split("```", 1)[1].split("```", 1)[0].strip()
+
+              output = output.split(
+                  "```",
+                  1
+              )[1].split(
+                  "```",
+                  1
+              )[0].strip()
 
           analyzed = json.loads(output)
 
-          with open("data/xai-analyzed.json", "w", encoding="utf-8") as f:
-              json.dump(analyzed, f, indent=2, ensure_ascii=False)
+          with open(
+              "data/xai-analyzed.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
 
-          print(f"Qwen analyzed {len(analyzed)} papers.")
+              json.dump(
+                  analyzed,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
+
+          print(
+              f"XAI Researcher Agent identified "
+              f"{len(analyzed)} relevant items."
+          )
+
           PY
 
-      - name: Show results
+      - name: Update CSV
         run: |
-          cat data/xai-analyzed.json
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          from datetime import date
+
+          csv_file = "data/xai-updates.csv"
+
+          with open(
+              "data/xai-analyzed.json",
+              encoding="utf-8"
+          ) as f:
+
+              items = json.load(f)
+
+          existing = set()
+
+          if os.path.exists(csv_file):
+
+              with open(
+                  csv_file,
+                  encoding="utf-8",
+                  newline=""
+              ) as f:
+
+                  reader = csv.DictReader(f)
+
+                  for row in reader:
+
+                      existing.add(
+                          row.get(
+                              "url",
+                              ""
+                          ).strip().lower()
+                      )
+
+          new_items = []
+
+          for item in items:
+
+              url = item["url"].strip()
+
+              if not url:
+                  continue
+
+              if url.lower() in existing:
+                  continue
+
+              new_items.append({
+
+                  "date":
+                      date.today().isoformat(),
+
+                  "category":
+                      item["category"],
+
+                  "title":
+                      item["title"],
+
+                  "source":
+                      item["source"],
+
+                  "url":
+                      url,
+
+                  "summary":
+                      item["summary"],
+
+                  "tags":
+                      ", ".join(
+                          item["tags"]
+                      )
+              })
+
+              existing.add(
+                  url.lower()
+              )
+
+          with open(
+              csv_file,
+              "a",
+              encoding="utf-8",
+              newline=""
+          ) as f:
+
+              writer = csv.DictWriter(
+                  f,
+                  fieldnames=[
+                      "date",
+                      "category",
+                      "title",
+                      "source",
+                      "url",
+                      "summary",
+                      "tags"
+                  ]
+              )
+
+              if os.path.getsize(csv_file) == 0:
+                  writer.writeheader()
+
+              writer.writerows(
+                  new_items
+              )
+
+          print(
+              f"Added "
+              f"{len(new_items)} "
+              f"new items."
+          )
+
+          PY
+
+      - name: Commit new information
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/
+
+          if git diff --cached --quiet; then
+            echo "No new information to commit."
+          else
+            git commit -m "Update XAI research database"
+            git push
+          fi
